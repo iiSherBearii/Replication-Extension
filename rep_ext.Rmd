@@ -1,0 +1,360 @@
+---
+title: "Replication and Extension"
+author: "Sheridamae Gudez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+*Replication Article*
+Grund, T. and Densley, J. (2015) Ethnic Homophily and Triad Closure: Mapping Internal Gang Structure Using Exponential Random Graph Models. Journal of Contemporary Criminal Justice, Vol. 31, Issue 3, pp. 354-370
+"Previous studies indicate the importance of similarities between street gang members in terms of ethnicity for mapping the patterns of co-offending relationships within gangs. Individual members are more likely to co-offend with other members who are from the same ethnicity. Past studies, however, do not appropriately account for the fact that correlation between attributes of co-offending gang members may be driven by alternative mechanisms. Most importantly, the presence of clustering in networks can dramatically affect the assessment and make us believe that homophily—the deliberate choice to co-offend with others from the same ethnic group—is important while in fact it is not. In this article, we recreate the internal structure of a London-based street gang with exponential random graph (ERG) models. Our results refine the role of ethnicity for co-offending within gangs. While homophily is still prevalent, the effect diminishes when triad closure—the tendency for two individuals to offend with each other when they also offend with a common third person—is considered. Furthermore, we extend existing ERG specifications and investigate the interaction between ethnic homophily and triad closure. Findings indicate that ethnic homophily is even stronger when it is embedded in co-offending triads"
+
+*Set-Up*
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Install Packages
+```{r message=FALSE, warning=FALSE, include=FALSE}
+rm(list=ls()) #Clearing environment
+libraries <- c("tidyverse","shinyjs", "sna", "intergraph", 
+               "GGally", "ggplot2", "tibble", "dplyr", "ggplot2", "texreg",
+               "ggpubr", "btergm", "igraph") #check for installed packages and read in libraries
+for (i in libraries){
+  tryCatch(library(i, character.only = TRUE),
+           print(paste(i, "installed")),
+           error = function(e) {install.packages(i);
+             library(i, character.only = TRUE)}
+  )
+  print(paste(i, "loaded"))
+}
+set.seed(5) #set seed for replication
+```
+Read-In Data
+Data is on co-offending in a London-based inner-city street gang, 2005-2009, operating from a social housing estate. Data comes from anonymised police arrest and conviction data for all confirmed members of the gang. 
+```{r}
+adj <- read.csv("LONDON_GANG.csv") #Edge List
+att <- read.csv("LONDON_GANG_ATTR.csv") #Attributes Data
+```
+
+*Data Cleaning*
+Mutate
+```{r}
+#Mutating att data#
+att$X <- paste0("X", att$X) #Create row names by prepending "X" to the values in the 'X' column
+#Mutating adj. matrix nodes#
+adj$X <- paste0("X", adj$X) #Create row names by prepending "X" to the values in the 'X' column
+adj <- adj %>%
+  column_to_rownames(var = "X")
+adj <- as.matrix(adj)
+```
+Creating Relationship Lists
+```{r}
+#Reshape the matrix into an undirected, binary edge list
+relationship <- as.data.frame(adj) %>%
+  rownames_to_column(var = "from") %>%
+  gather(key = "to", value = "relationship", -from)
+relationship <- relationship %>%#Convert relationship values to binary ties and filter
+  filter(relationship > 1) %>% # Keep only co-offending relationships
+  mutate(pair = pmap_chr(list(from, to), ~ paste(sort(c(...)), collapse = "-"))) %>% # Create a pair identifier while retaining the relationship value
+  group_by(pair) %>% # Keep only distinct pairs, but keep the first occurrence of the relationship
+  summarise(from = first(from), to = first(to), relationship = first(relationship), .groups = 'drop') %>%
+  select(-pair) # Remove the pair column
+```
+
+*Create iGraph Objects*
+1-Mode matrix 54 x 54 persons by persons, undirected, valued. 
+Network tie values:1 (hang out together); 2 (co-offend together); 3 (co-offend together, serious crime); 4 (co-offend together, serious crime, kin).
+Attributes: Age, Birthplace (1 = West Africa, 2= Caribbean, 3= UK, 4= East Africa), Residence, Arrests, Convictions, Prison, Music.
+
+Igraph Network
+```{r}
+igang <- graph_from_adjacency_matrix(adj, mode="undirected", weighted=T) #Create an igraph object
+# Apply a threshold to keep only nodes with weight > 1
+threshold <- 2
+igang <- delete_edges(igang, E(igang)[weight < threshold]) 
+igang <- delete_vertices(igang, V(igang)[degree(igang) == 0])
+```
+Adding Attributes Data
+```{r}
+#Subset the attributes to match the number of vertices#
+# Step 1: Extract the node names from the network object
+network_nodes <- as.character(V(igang)$name)  # Ensure it's a character vector
+# Step 2: Ensure 'id' in the dataframe is also a character vector
+att$X <- as.character(att$X)
+# Step 3: Filter the attribute dataframe to only keep rows with nodes present in the network
+att <- att %>%
+  filter(X %in% network_nodes)
+#Edge Attributes#
+E(igang)$relationship <- relationship$relationship #apply edge attributes
+# Define colors for each type of relationship
+edge_colors <- c("green","blue", "yellow", "red") #1 (hang out together); 2 (co-offend together); 3 (co-offend together, serious crime); 4 (co-offend together, serious crime, kin).
+#Vertex Attributes#
+#Applying attributes#
+V(igang)$age <- att$Age # Apply 'age' attribute
+V(igang)$residence <- att$Residence # Apply 'residence' attribute
+V(igang)$residence <- as.factor(V(igang)$residence)
+V(igang)$arrests <- att$Arrests # Apply 'arrests' attribute
+V(igang)$convictions <- att$Convictions # Apply 'convictions' attribute
+V(igang)$prison <- att$Prison # Apply 'prison' attribute
+V(igang)$prison <- as.factor(V(igang)$prison)
+V(igang)$music <- att$Music # Apply 'music' attribute
+V(igang)$music <- as.factor(V(igang)$music)
+V(igang)$rank <- att$Ranking # Apply 'ranking' attribute
+# Map Birthplace to shapes
+V(igang)$birthplace <- as.factor(att$Birthplace) # Apply 'birthplace' attribute
+```
+Extract Attribute Data for Descriptives
+```{r}
+#Extract node attributes
+vertex_data <- data.frame(id = V(igang)$name, 
+                          age = V(igang)$age, 
+                          residence = V(igang)$residence, 
+                          arrests = V(igang)$arrests, 
+                          convictions = V(igang)$convictions, 
+                          prison = V(igang)$prison, 
+                          music = V(igang)$music, 
+                          rank = V(igang)$rank, 
+                          birthplace = V(igang)$birthplace
+                          )
+```
+
+*Descriptives*
+Creating Plot Aesthetics
+```{r}
+#Creating Birthplace legend levels
+birthplace_shapes <- c("circle", "square", "triangle", "diamond")
+names(birthplace_shapes) <- c("West Africa", "Caribbean", "UK", "East Africa")
+# Map Birthplace to colors
+birthplace_colors <- c("orange", "brown", "darkgrey", "purple")
+names(birthplace_colors) <- c("West Africa", "Caribbean", "UK", "East Africa")
+#Assign vertex shapes and colors based on Birthplace
+V(igang)$bshape <- birthplace_shapes[V(igang)$birthplace]
+V(igang)$bcolor <- birthplace_colors[V(igang)$birthplace]
+
+# triangle vertex shape
+mytriangle <- function(coords, v = NULL, params) {
+  vertex.color <- params("vertex", "color")
+  if (length(vertex.color) != 1 && !is.null(v)) {
+    vertex.color <- vertex.color[v]
+  }
+  vertex.size <- 1 / 200 * params("vertex", "size")
+  if (length(vertex.size) != 1 && !is.null(v)) {
+    vertex.size <- vertex.size[v]
+  }
+  symbols(
+    x = coords[, 1], y = coords[, 2], bg = vertex.color,
+    stars = cbind(vertex.size, vertex.size, vertex.size),
+    add = TRUE, inches = FALSE
+  )
+}
+# clips as a circle
+add_shape("triangle",
+  clip = shapes("circle")$clip,
+  plot = mytriangle
+)
+
+mystar <- function(coords, v = NULL, params) {
+  vertex.color <- params("vertex", "color")
+  if (length(vertex.color) != 1 && !is.null(v)) {
+    vertex.color <- vertex.color[v]
+  }
+  vertex.size <- 1 / 200 * params("vertex", "size")
+  if (length(vertex.size) != 1 && !is.null(v)) {
+    vertex.size <- vertex.size[v]
+  }
+  
+# Draw a diamond (rotated square)
+mapply(coords[, 1], coords[, 2], vertex.color, vertex.size,
+    FUN = function(x, y, bg, size) {
+      # Rotate the square 45 degrees to make it a diamond
+      symbols(
+        x = x, y = y, bg = bg,
+        squares = size,  # Use squares to draw the base shape
+        add = TRUE, inches = FALSE,
+        fg = bg  # Fill the diamond shape
+      )
+      # Rotate by 45 degrees
+      polygon(c(x, x + size, x, x - size), c(y + size, y, y - size, y),
+              col = bg, border = bg)
+    }
+  )
+}
+
+# No clipping, edges will be below the vertices anyway
+add_shape("diamond",
+  clip = shape_noclip,
+  plot = mystar
+)
+
+```
+
+Descriptive Summary of Node Attributes and Initial Plot
+```{r}
+summary(vertex_data)
+initialP <- plot(igang, #visualize the network
+                 layout = layout_with_fr, #set layout using FR algorithm
+                 edge.width = 1,  # Edge width corresponds to relationship level
+                 edge.color = "black",  # Color edges by relationship
+                 vertex.shape= V(igang)$bshape, #apply color levels for birthplace attribute
+                 vertex.color= V(igang)$bcolor, #apply shape levels for birthplace attribute
+                 vertex.label = "",  # Show node labels
+                 vertex.size = 9,  # Adjust node size
+                 main = "Fig. 1: Co-Offending Network of Youth Gang",
+                 sub="Data Source: Grund, T. and Densley, J. (2015) Ethnic Homophily and Triad Closure: 
+                 Mapping Internal Gang Structure Using Exponential Random Graph Models. 
+                 Journal of Contemporary Criminal Justice, Vol. 31, Issue 3, pp. 354-370 "
+                 )
+legend("bottomleft",                   # Position of the legend (can be adjusted)
+       legend = names(birthplace_shapes),  # Names of the Birthplace categories
+       pch = c(21, 22, 24, 23),      # Corresponding point shapes for the legend
+       pt.cex = 2,                   # Size of the shapes in the legend
+       col = birthplace_colors,      # Colors matching the Birthplace categories
+       pt.bg = birthplace_colors,    # Background colors of the shapes
+       title = "Birthplace",         # Title of the legend
+       bty = "n")                    # No box around the legend
+```
+Attributes Distribution
+```{r fig.height=5, fig.width=13}
+#Age
+p1<- ggplot(vertex_data, aes(x = age)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "skyblue2", color = "black", alpha = 0.7) +
+  geom_density(fill = "skyblue2", alpha = 0.5) +
+  labs(title = "",
+       x = "Age",
+       y = "Density") +
+  theme_minimal()
+#Birthplace
+vertex_data <- vertex_data %>% #applying country names
+  mutate(birthplace = case_when(
+    birthplace == 1 ~ "West Africa",
+    birthplace == 2 ~ "Caribbean",
+    birthplace == 3 ~ "UK",
+    birthplace == 4 ~ "East Africa",
+    TRUE ~ as.character(birthplace)  # Ensure no NAs if other values exist
+  ))
+p2<- ggplot(data = vertex_data, aes(x = factor(birthplace))) +
+    geom_bar()+
+  labs(title = "",
+       x = "Birthplace",
+       y = "Density") +
+  theme_minimal()
+#Residence
+p3<- ggplot(data = vertex_data, aes(x = factor(residence))) +
+    geom_bar()+
+  labs(title = "",
+       x = "Residence",
+       y = "Density") +
+  theme_minimal()
+#Arrests
+p4<- ggplot(vertex_data, aes(x = arrests)) +
+   geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "forestgreen", color = "black", alpha = 0.7)+
+  geom_density(fill = "forestgreen", alpha = 0.5) +
+  labs(title = "",
+       x = "Arrests",
+       y = "Density") +
+  theme_minimal()
+#Convictions
+p5<- ggplot(vertex_data, aes(x = convictions)) +
+   geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "forestgreen", color = "black", alpha = 0.7)+
+  geom_density(fill = "forestgreen", alpha = 0.5) +
+  labs(title = "",
+       x = "Convictions",
+       y = "Density") +
+  theme_minimal()
+#Prison
+p6<- ggplot(data = vertex_data, aes(x = factor(prison))) +
+    geom_bar()+
+  labs(title = "",
+       x = "Prison (1=Yes)",
+       y = "Density") +
+  theme_minimal()
+
+#Music
+p7<- ggplot(data = vertex_data, aes(x = factor(music))) +
+    geom_bar()+
+  labs(title = "",
+       x = "Music",
+       y = "Density") +
+  theme_minimal()
+#Ranking
+p8<- ggplot(vertex_data, aes(x = rank)) +
+   geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "red", color = "black", alpha = 0.7)+
+  geom_density(fill = "red", alpha = 0.5) +
+  labs(title = "",
+       x = "Ranking",
+       y = "Density") +
+  theme_minimal()
+annotate_figure(ggarrange(p1,p2,p3,p4, p5, p6, p7, p8,
+                          ncol = 4, nrow = 2, 
+                          labels = c("Age", "Birthplace","Residence","Arrests", "Convictions", "Prison", "Music", "Rank")))
+```
+Relationship Plot
+```{r}
+plot(igang, #visualize the network
+     layout = layout_with_fr, #set layout using FR algorithm
+     edge.width = 1,  # Edge width corresponds to relationship level
+     edge.color = edge_colors[E(igang)$relationship],  # Color edges by relationship
+     vertex.label = "",  # Show node labels
+     vertex.size = 7,  # Adjust node size
+     vertex.shape= V(igang)$bshape, #apply color levels for birthplace attribute
+     vertex.color= V(igang)$bcolor, #apply shape levels for birthplace attribute
+     main = "Fig. 2: London Street Gang Network with Relationship Levels",
+     sub="co-offend together= Blue
+     co-offend together, serious crime= Yellow
+     co-offend together, serious crime, kin= Red"
+     )
+legend("bottomleft",                   # Position of the legend (can be adjusted)
+       legend = names(birthplace_shapes),  # Names of the Birthplace categories
+       pch = c(21, 22, 24, 23),      # Corresponding point shapes for the legend
+       pt.cex = 2,                   # Size of the shapes in the legend
+       col = birthplace_colors,      # Colors matching the Birthplace categories
+       pt.bg = birthplace_colors,    # Background colors of the shapes
+       title = "Birthplace",         # Title of the legend
+       bty = "n")                    # No box around the legend
+```
+
+*Replication*
+```{r}
+library(statnet) #load statnet
+library(intergraph)
+```
+Network from Network Package
+```{r}
+gang <- as.network(as.matrix(adj>1),directed=F) #create network object
+network::set.vertex.attribute(gang,names(att),att) # Add the vertex attributes into the network
+```
+
+```{r}
+plot(gang,
+     displaylabels=T,
+     label.cex=.5,
+     edge.col=rgb(150,150,150,100,maxColorValue=255),
+     displayisolates=F)               
+```
+
+
+ERGM: Homophily
+Model 1
+```{r}
+model1 <- ergm(gang ~ edges + nodematch("Birthplace")) #Model 1 replication
+model2 <- ergm(gang ~ edges + nodematch("Birthplace") + gwesp(0, fixed = TRUE)) #Model 2 Replication
+model4 <- ergm(gang ~ edges + nodematch("Birthplace") + nodefactor("Birthplace") + gwesp(0, fixed = TRUE)) #Model 2 Replication
+```
+
+All Model Summary and Goodness of Fit
+```{r}
+#All Models
+screenreg(list(model1, model2, model3), digits = 3, caption = "ERGM", label = "ergm",
+       custom.coef.map = list("edges" = "Edges", 
+                              "nodematch.Birthplace" = "Match(Birthplace)",
+                              "nodefactor.Birthplace.2"="Caribean",
+                              "nodefactor.Birthplace.3"="UK",
+                              "nodefactor.Birthplace.4"="East Africa",
+                              "gwesp.fixed.0"= "GWESP"
+       ))
+#Goodness of Fit
+#Assess model fit-m2
+gof<- ergm::gof(model3 ~ model + deg + esp + triadcensus + distance)
+#visualize goodness-of-fit measures 
+ergm:::plot.gof(gof)
+```
+
